@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+
+# Explicitly track and include SQLite database and SQL dump in GitHub
+!recruitment_tracker.db
+!recruitment_tracker_dump.sql
