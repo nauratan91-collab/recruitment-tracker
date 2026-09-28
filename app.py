@@ -1409,6 +1409,7 @@ def update_settings_endpoint():
         'settings': get_all_system_settings()
     })
 
+# Production cloud entrypoint for Render and local development
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"Starting Job Requirement Tracker server on 0.0.0.0:{port}")
