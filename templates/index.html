@@ -67,53 +67,8 @@
 
                 <button type="submit" id="loginSubmitBtn" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm rounded-lg shadow-md transition flex items-center justify-center space-x-2">
                     <i class="fa-solid fa-arrow-right-to-bracket"></i>
-                    <span>Sign In with Credentials</span>
+                    <span>Sign In to Portal</span>
                 </button>
-
-                <!-- Microsoft Dynamics 365 Corporate SSO Divider & Button -->
-                <div class="relative flex py-1 items-center">
-                    <div class="flex-grow border-t border-slate-200"></div>
-                    <span class="flex-shrink mx-3 text-slate-400 text-[10px] uppercase font-bold tracking-wider">Or Enterprise SSO</span>
-                    <div class="flex-grow border-t border-slate-200"></div>
-                </div>
-
-                <button type="button" onclick="openMicrosoftSsoModal()" class="w-full py-2.5 bg-white hover:bg-slate-50 text-slate-800 font-bold text-xs sm:text-sm rounded-lg border border-slate-300 shadow-sm transition flex items-center justify-center space-x-2.5">
-                    <svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 21 21">
-                        <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
-                        <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
-                        <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
-                        <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
-                    </svg>
-                    <span>Sign in with Microsoft Dynamics 365</span>
-                </button>
-
-                <!-- Quick fill helper chips for easy testing -->
-                <div class="pt-3 border-t border-slate-100">
-                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider text-center mb-2">Corporate Test Accounts (Key Dynamics)</p>
-                    <div class="grid grid-cols-3 gap-2">
-                        <button type="button" onclick="fillQuickLogin('admin@keydynamicssolutions.com', 'Admin@123')" class="p-2 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg text-left transition">
-                            <div class="flex items-center space-x-1">
-                                <i class="fa-solid fa-user-gear text-purple-600 text-xs"></i>
-                                <span class="text-xs font-bold text-purple-900">Admin</span>
-                            </div>
-                            <p class="text-[9px] text-purple-600 mt-0.5 font-mono truncate">admin@keydynamicssolutions.com</p>
-                        </button>
-                        <button type="button" onclick="fillQuickLogin('manager@keydynamicssolutions.com', 'Manager@123')" class="p-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg text-left transition">
-                            <div class="flex items-center space-x-1">
-                                <i class="fa-solid fa-user-check text-emerald-600 text-xs"></i>
-                                <span class="text-xs font-bold text-emerald-900">Manager</span>
-                            </div>
-                            <p class="text-[9px] text-emerald-700 mt-0.5 font-mono truncate">manager@keydynamicssolutions.com</p>
-                        </button>
-                        <button type="button" onclick="fillQuickLogin('user@keydynamicssolutions.com', 'User@123')" class="p-2 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg text-left transition">
-                            <div class="flex items-center space-x-1">
-                                <i class="fa-solid fa-user-tie text-indigo-600 text-xs"></i>
-                                <span class="text-xs font-bold text-indigo-900">User</span>
-                            </div>
-                            <p class="text-[9px] text-indigo-600 mt-0.5 font-mono truncate">user@keydynamicssolutions.com</p>
-                        </button>
-                    </div>
-                </div>
             </form>
         </div>
     </div>
@@ -163,22 +118,6 @@
                         </div>
                     </div>
                 </div>
-
-                <!-- Role Switcher (Available for Admin preview) -->
-                <div id="roleSwitcherBox" class="hidden sm:flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700">
-                    <span class="text-xs text-slate-400 px-2 font-medium">View:</span>
-                    <button id="roleUserBtn" onclick="switchRole('User')" class="px-2 py-1 text-xs font-semibold rounded-md transition-colors bg-indigo-600 text-white shadow">
-                        <i class="fa-solid fa-user-tie mr-1"></i> User
-                    </button>
-                    <button id="roleManagerBtn" onclick="switchRole('Manager')" class="px-2 py-1 text-xs font-semibold rounded-md transition-colors text-slate-300 hover:text-white">
-                        <i class="fa-solid fa-user-check mr-1"></i> Manager
-                    </button>
-                    <button id="roleAdminBtn" onclick="switchRole('Admin')" class="px-2 py-1 text-xs font-semibold rounded-md transition-colors text-slate-300 hover:text-white">
-                        <i class="fa-solid fa-user-gear mr-1"></i> Admin
-                    </button>
-                </div>
-
-                <span id="roleBadge" class="bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs px-2.5 py-1 rounded-full font-semibold">User Mode</span>
 
                 <div class="h-6 w-px bg-slate-700"></div>
 
@@ -2291,16 +2230,6 @@
                 currentRole = currentUser.role;
                 switchRole(currentUser.role);
 
-                // If user is not Admin, hide role switcher box so they can't switch roles
-                const switcher = document.getElementById('roleSwitcherBox');
-                if (switcher) {
-                    if (currentUser.role === 'Admin') {
-                        switcher.classList.remove('hidden');
-                    } else {
-                        switcher.classList.add('hidden');
-                    }
-                }
-
                 // Show or hide New User admin tab and header button based on role or rights
                 const isAdmin = currentUser && (currentUser.role === 'Admin' || (currentUser.rights && currentUser.rights.can_access_admin));
                 const tabAdmin = document.getElementById('tab-admin');
@@ -2483,30 +2412,6 @@
         // -------------------------------------------------------------------
         function switchRole(role) {
             currentRole = role;
-            const userBtn = document.getElementById('roleUserBtn');
-            const managerBtn = document.getElementById('roleManagerBtn');
-            const adminBtn = document.getElementById('roleAdminBtn');
-            const badge = document.getElementById('roleBadge');
-
-            const inactiveStyle = "px-2.5 py-1 text-xs font-semibold rounded-md transition-colors text-slate-300 hover:text-white";
-            if (userBtn) userBtn.className = inactiveStyle;
-            if (managerBtn) managerBtn.className = inactiveStyle;
-            if (adminBtn) adminBtn.className = inactiveStyle;
-
-            if (role === 'Admin') {
-                if (adminBtn) adminBtn.className = "px-2.5 py-1 text-xs font-semibold rounded-md transition-colors bg-purple-600 text-white shadow";
-                badge.innerText = "Admin Mode";
-                badge.className = "bg-purple-500/20 text-purple-300 border border-purple-500/30 text-xs px-2.5 py-0.5 rounded-full font-semibold";
-            } else if (role === 'Manager') {
-                if (managerBtn) managerBtn.className = "px-2.5 py-1 text-xs font-semibold rounded-md transition-colors bg-emerald-600 text-white shadow";
-                badge.innerText = "Manager Mode";
-                badge.className = "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs px-2.5 py-0.5 rounded-full font-semibold";
-            } else {
-                if (userBtn) userBtn.className = "px-2.5 py-1 text-xs font-semibold rounded-md transition-colors bg-indigo-600 text-white shadow";
-                badge.innerText = "User Mode";
-                badge.className = "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs px-2.5 py-0.5 rounded-full font-semibold";
-            }
-
             if (currentUser) {
                 updateHeaderUserProfile({ ...currentUser, role: role });
             }
