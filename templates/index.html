@@ -2320,12 +2320,6 @@
             showLogin();
         }
 
-        function fillQuickLogin(username, password) {
-            document.getElementById('loginUsername').value = username;
-            document.getElementById('loginPassword').value = password;
-            const alertBox = document.getElementById('loginAlert');
-            if (alertBox) alertBox.classList.add('hidden');
-        }
 
         function togglePasswordVisibility(inputId, iconId) {
             const input = document.getElementById(inputId);
