@@ -824,7 +824,8 @@ Simply **double-click** `index.html` in Windows File Explorer. It opens right in
     shutil.copy2(zip_path, desktop_zip)
     print(f"Copied to Desktop: {desktop_zip} ({os.path.getsize(desktop_zip)} bytes)")
 
-    # Also copy the root index.html to Desktop directly
+    # Also copy the root index.html to proj_dir and Desktop directly
+    shutil.copy2(os.path.join(output_dir, "index.html"), os.path.join(proj_dir, "index.html"))
     shutil.copy2(os.path.join(output_dir, "index.html"), os.path.join(desktop_dir, "index.html"))
     shutil.copy2(os.path.join(output_dir, "index.html"), os.path.join(r"C:\Users\ITkey\Downloads", "index.html"))
 

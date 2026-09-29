@@ -4,10 +4,53 @@ import unittest
 from app import app
 from database import init_db, get_db
 
+class AuthenticatedClient:
+    """Wrapper around Flask TestClient that injects and dynamically tracks active Bearer Access Token."""
+    def __init__(self, raw_client):
+        self.raw_client = raw_client
+        self.active_token = None
+
+    def _prepare_kwargs(self, kwargs):
+        headers = dict(kwargs.get('headers') or {})
+        if 'Authorization' not in headers and self.active_token:
+            headers['Authorization'] = f'Bearer {self.active_token}'
+        kwargs['headers'] = headers
+        return kwargs
+
+    def get(self, *args, **kwargs):
+        return self.raw_client.get(*args, **self._prepare_kwargs(kwargs))
+
+    def post(self, *args, **kwargs):
+        res = self.raw_client.post(*args, **self._prepare_kwargs(kwargs))
+        if args and '/api/auth/login' in args[0] and res.status_code == 200:
+            data = res.get_json()
+            if data and data.get('access_token'):
+                self.active_token = data['access_token']
+        elif args and '/api/auth/logout' in args[0]:
+            self.active_token = None
+        return res
+
+    def put(self, *args, **kwargs):
+        return self.raw_client.put(*args, **self._prepare_kwargs(kwargs))
+
+    def patch(self, *args, **kwargs):
+        return self.raw_client.patch(*args, **self._prepare_kwargs(kwargs))
+
+    def delete(self, *args, **kwargs):
+        return self.raw_client.delete(*args, **self._prepare_kwargs(kwargs))
+
+    def __getattr__(self, name):
+        return getattr(self.raw_client, name)
+
+
 class TestRecruitmentTracker(unittest.TestCase):
     def setUp(self):
         app.config['TESTING'] = True
-        self.client = app.test_client()
+        self.raw_client = app.test_client()
+        self.client = AuthenticatedClient(self.raw_client)
+        # Login as Admin by default so all management and setup tests run with full privileges
+        login_res = self.client.post('/api/auth/login', json={'username': 'admin', 'password': 'Admin@123'})
+        self.admin_token = self.client.active_token
 
     def test_01_dashboard_stats(self):
         response = self.client.get('/api/dashboard/stats')
@@ -714,13 +757,14 @@ class TestRecruitmentTracker(unittest.TestCase):
 
     def test_32_admin_panel_access_control(self):
         # 1. Login as regular User
-        self.client.post('/api/auth/login', json={
+        login_res = self.raw_client.post('/api/auth/login', json={
             'username': 'user',
             'password': 'User@123'
         })
+        user_token = login_res.get_json().get('access_token')
 
-        # 2. Try to access Admin Users API -> Must return 403 Forbidden
-        res_forbidden = self.client.get('/api/admin/users')
+        # 2. Try to access Admin Users API with regular user token -> Must return 403 Forbidden
+        res_forbidden = self.raw_client.get('/api/admin/users', headers={'Authorization': f'Bearer {user_token}'})
         self.assertEqual(res_forbidden.status_code, 403)
         self.assertIn('error', res_forbidden.get_json())
         print("[OK] Admin Panel RBAC Access Control Test Passed!")
@@ -764,6 +808,34 @@ class TestRecruitmentTracker(unittest.TestCase):
         self.assertNotIn('id="sec-documentation"', dist_html)
         self.assertNotIn('User Manual & Guide', dist_html)
         print("[OK] User Manual Complete Removal Verification Test Passed!")
+
+    def test_35_unauthenticated_api_rejection(self):
+        # Protected endpoints must strictly return 401 Unauthorized without Bearer token
+        endpoints = [
+            ('/api/dashboard/stats', 'GET'),
+            ('/api/requirements', 'GET'),
+            ('/api/requirements', 'POST'),
+            ('/api/candidates', 'GET'),
+            ('/api/database/stats', 'GET'),
+            ('/api/admin/users', 'GET'),
+            ('/api/settings', 'GET')
+        ]
+        for url, method in endpoints:
+            if method == 'GET':
+                res = self.raw_client.get(url)
+            else:
+                res = self.raw_client.post(url, json={})
+            self.assertEqual(res.status_code, 401, f"Endpoint {url} was not blocked without token!")
+            err_data = res.get_json()
+            self.assertEqual(err_data.get('code'), 'AUTH_REQUIRED')
+        print("[OK] Backend Unauthenticated API Lockdown (401 Verification) Test Passed!")
+
+    def test_36_invalid_token_rejection(self):
+        res = self.raw_client.get('/api/dashboard/stats', headers={'Authorization': 'Bearer invalid.tampered.token'})
+        self.assertEqual(res.status_code, 401)
+        err_data = res.get_json()
+        self.assertEqual(err_data.get('code'), 'INVALID_TOKEN')
+        print("[OK] Invalid/Tampered Token Rejection Test Passed!")
 
 if __name__ == '__main__':
     unittest.main()

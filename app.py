@@ -14,9 +14,23 @@ from database import (
     delete_user, verify_or_create_microsoft_user, get_default_rights,
     get_system_setting, set_system_setting, get_all_system_settings
 )
+from dependencies import (
+    generate_access_token, verify_access_token, extract_token_from_request,
+    provide_current_user, provide_db, inject
+)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'key-dynamics-solutions-secure-secret-2026')
+
+@app.teardown_appcontext
+def close_db_connection(exception=None):
+    from flask import g
+    db_conn = g.pop('db_conn', None)
+    if db_conn is not None:
+        try:
+            db_conn.close()
+        except Exception:
+            pass
 
 # Configure upload folders (Serverless /tmp fallback for Vercel)
 IS_VERCEL = os.environ.get('VERCEL') == '1' or os.environ.get('AWS_LAMBDA_FUNCTION_NAME')
@@ -105,9 +119,14 @@ def login():
     session['full_name'] = user.get('full_name')
     session['rights'] = user.get('rights_parsed', get_default_rights(user['role']))
 
+    access_token = generate_access_token(user)
+
     return jsonify({
         'success': True,
         'message': 'Login successful',
+        'access_token': access_token,
+        'token_type': 'Bearer',
+        'expires_in': 86400 * 7,
         'user': {
             'id': user['id'],
             'username': user['username'],
@@ -142,10 +161,15 @@ def microsoft_login():
     session['full_name'] = user.get('full_name')
     session['rights'] = user.get('rights_parsed', get_default_rights(user['role']))
 
+    access_token = generate_access_token(user)
+
     return jsonify({
         'success': True,
         'auth_provider': 'microsoft_dynamics_365',
         'message': 'Microsoft Dynamics 365 authentication successful',
+        'access_token': access_token,
+        'token_type': 'Bearer',
+        'expires_in': 86400 * 7,
         'user': {
             'id': user['id'],
             'username': user['username'],
@@ -164,24 +188,25 @@ def logout():
     return jsonify({'success': True, 'message': 'Logged out successfully'})
 
 @app.route('/api/auth/me', methods=['GET'])
-def get_current_user():
-    user_id = session.get('user_id')
-    if not user_id:
-        return jsonify({'authenticated': False}), 200
-
-    user = get_user_by_id(user_id)
-    if not user:
-        session.clear()
+@inject(require_auth=False)
+def get_current_user(current_user=None):
+    if not current_user:
+        user_id = session.get('user_id')
+        if user_id:
+            user = get_user_by_id(user_id)
+            if user:
+                return jsonify({'authenticated': True, 'user': user})
         return jsonify({'authenticated': False}), 200
 
     return jsonify({
         'authenticated': True,
-        'user': user
+        'user': current_user
     })
 
 @app.route('/api/auth/change-password', methods=['POST'])
-def change_password():
-    user_id = session.get('user_id')
+@inject(require_auth=False)
+def change_password(current_user=None, db=None):
+    user_id = current_user['id'] if current_user else session.get('user_id')
     data = request.json or {}
 
     # Support changing password while logged in or specifying username
@@ -201,11 +226,9 @@ def change_password():
 
     target_user_id = user_id
     if not target_user_id and username:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT id FROM users WHERE username = ?", (username,))
-        row = c.fetchone()
-        conn.close()
+        cursor = db.cursor()
+        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+        row = cursor.fetchone()
         if row:
             target_user_id = row['id']
 
@@ -222,9 +245,9 @@ def change_password():
 # DASHBOARD STATS API
 # -------------------------------------------------------------------
 @app.route('/api/dashboard/stats', methods=['GET'])
-def get_dashboard_stats():
-    conn = get_db()
-    cursor = conn.cursor()
+@inject(require_auth=True)
+def get_dashboard_stats(current_user=None, db=None):
+    cursor = db.cursor()
 
     # Total requirements & positions
     cursor.execute("SELECT COUNT(*), COALESCE(SUM(open_positions), 0) FROM job_requirements WHERE status = 'Active'")
@@ -260,8 +283,6 @@ def get_dashboard_stats():
     comp_row = cursor.fetchone()
     fully_compliant = comp_row['fully_compliant'] or 0
     total_compliance_records = comp_row['total'] or 0
-
-    conn.close()
 
     return jsonify({
         'total_requirements': total_reqs,
@@ -322,9 +343,9 @@ def calculate_tat(open_date_str, close_date_str=None, status='Active', created_a
     return tat_days, tat_display, badge_type
 
 @app.route('/api/requirements', methods=['GET'])
-def get_requirements():
-    conn = get_db()
-    cursor = conn.cursor()
+@inject(require_auth=True)
+def get_requirements(current_user=None, db=None):
+    cursor = db.cursor()
 
     cursor.execute("""
         SELECT 
@@ -374,8 +395,6 @@ def get_requirements():
                 d['download_url'] = f"/api/compliance/documents/{d['file_name']}"
             docs_by_req[req_id][ag_type] = d
 
-    conn.close()
-
     result = []
     for row in rows:
         r_dict = dict(row)
@@ -400,7 +419,8 @@ def get_requirements():
     return jsonify(result)
 
 @app.route('/api/requirements', methods=['POST'])
-def create_requirement():
+@inject(require_auth=True)
+def create_requirement(current_user=None, db=None):
     data = request.json or {}
     client_name = data.get('client_name')
     job_title = data.get('job_title')
@@ -415,8 +435,7 @@ def create_requirement():
     if status in ['Filled', 'Closed'] and not close_date:
         close_date = date.today().isoformat()
 
-    conn = get_db()
-    cursor = conn.cursor()
+    cursor = db.cursor()
 
     spoc_name = data.get('spoc_name', '').strip() if data.get('spoc_name') else ''
     spoc_mobile = data.get('spoc_mobile', '').strip() if data.get('spoc_mobile') else ''
@@ -455,15 +474,14 @@ def create_requirement():
         1 if data.get('consultant_msa_shared') else 0
     ))
 
-    conn.commit()
-    conn.close()
+    db.commit()
 
     return jsonify({'message': 'Requirement created successfully', 'id': req_id}), 201
 
 @app.route('/api/requirements/<int:req_id>', methods=['GET'])
-def get_single_requirement(req_id):
-    conn = get_db()
-    cursor = conn.cursor()
+@inject(require_auth=True)
+def get_single_requirement(req_id, current_user=None, db=None):
+    cursor = db.cursor()
 
     cursor.execute("""
         SELECT r.*, c.client_nda_shared, c.client_msa_shared, c.vendor_nda_shared, c.vendor_msa_shared, c.consultant_nda_shared, c.consultant_msa_shared
@@ -474,14 +492,11 @@ def get_single_requirement(req_id):
     req_row = cursor.fetchone()
 
     if not req_row:
-        conn.close()
         return jsonify({'error': 'Requirement not found'}), 404
 
     # Fetch candidates for this requirement
     cursor.execute("SELECT * FROM candidates WHERE job_requirement_id = ? ORDER BY id DESC", (req_id,))
     candidates = [dict(c) for c in cursor.fetchall()]
-
-    conn.close()
     
     result = dict(req_row)
     result['candidates'] = candidates
@@ -501,66 +516,63 @@ def get_single_requirement(req_id):
     return jsonify(result)
 
 @app.route('/api/requirements/<int:req_id>', methods=['PUT'])
-def update_requirement(req_id):
+@inject(require_auth=True)
+def update_requirement(req_id, current_user=None, db=None):
     data = request.json or {}
-    conn = get_db()
-    try:
-        cursor = conn.cursor()
+    cursor = db.cursor()
 
-        status = data.get('status', 'Active')
-        open_date = data.get('open_date') or date.today().isoformat()
-        close_date = data.get('close_date')
-        if status in ['Filled', 'Closed'] and not close_date:
-            close_date = date.today().isoformat()
-        elif status in ['Active', 'On Hold']:
-            close_date = None
+    status = data.get('status', 'Active')
+    open_date = data.get('open_date') or date.today().isoformat()
+    close_date = data.get('close_date')
+    if status in ['Filled', 'Closed'] and not close_date:
+        close_date = date.today().isoformat()
+    elif status in ['Active', 'On Hold']:
+        close_date = None
 
-        spoc_name = data.get('spoc_name', '').strip() if data.get('spoc_name') is not None else ''
-        spoc_mobile = data.get('spoc_mobile', '').strip() if data.get('spoc_mobile') is not None else ''
+    spoc_name = data.get('spoc_name', '').strip() if data.get('spoc_name') is not None else ''
+    spoc_mobile = data.get('spoc_mobile', '').strip() if data.get('spoc_mobile') is not None else ''
 
-        open_positions = data.get('open_positions')
-        if open_positions is None or open_positions == '':
+    open_positions = data.get('open_positions')
+    if open_positions is None or open_positions == '':
+        open_positions = 1
+    else:
+        try:
+            open_positions = int(open_positions)
+        except (ValueError, TypeError):
             open_positions = 1
-        else:
-            try:
-                open_positions = int(open_positions)
-            except (ValueError, TypeError):
-                open_positions = 1
 
-        cursor.execute("""
-            UPDATE job_requirements
-            SET client_name = ?, end_client = ?, spoc_name = ?, spoc_mobile = ?, job_title = ?, job_description = ?,
-                work_location_type = ?, location_city = ?, budget = ?, open_positions = ?, 
-                status = ?, open_date = ?, close_date = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-        """, (
-            data.get('client_name'),
-            data.get('end_client'),
-            spoc_name,
-            spoc_mobile,
-            data.get('job_title'),
-            data.get('job_description'),
-            data.get('work_location_type', 'Hybrid'),
-            data.get('location_city'),
-            data.get('budget'),
-            open_positions,
-            status,
-            open_date,
-            close_date,
-            req_id
-        ))
+    cursor.execute("""
+        UPDATE job_requirements
+        SET client_name = ?, end_client = ?, spoc_name = ?, spoc_mobile = ?, job_title = ?, job_description = ?,
+            work_location_type = ?, location_city = ?, budget = ?, open_positions = ?, 
+            status = ?, open_date = ?, close_date = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (
+        data.get('client_name'),
+        data.get('end_client'),
+        spoc_name,
+        spoc_mobile,
+        data.get('job_title'),
+        data.get('job_description'),
+        data.get('work_location_type', 'Hybrid'),
+        data.get('location_city'),
+        data.get('budget'),
+        open_positions,
+        status,
+        open_date,
+        close_date,
+        req_id
+    ))
 
-        conn.commit()
-        return jsonify({'message': 'Requirement updated successfully'})
-    finally:
-        conn.close()
+    db.commit()
+    return jsonify({'message': 'Requirement updated successfully'})
 
 @app.route('/api/requirements/<int:req_id>/status', methods=['PATCH', 'PUT'])
-def update_requirement_status(req_id):
+@inject(require_auth=True)
+def update_requirement_status(req_id, current_user=None, db=None):
     data = request.json or {}
     new_status = data.get('status', 'Active')
-    conn = get_db()
-    cursor = conn.cursor()
+    cursor = db.cursor()
 
     if new_status in ['Filled', 'Closed']:
         today_iso = date.today().isoformat()
@@ -568,15 +580,14 @@ def update_requirement_status(req_id):
     else:
         cursor.execute("UPDATE job_requirements SET status = ?, close_date = NULL WHERE id = ?", (new_status, req_id))
 
-    conn.commit()
-    conn.close()
+    db.commit()
     return jsonify({'message': 'Requirement status updated successfully', 'status': new_status})
 
 @app.route('/api/requirements/<int:req_id>/compliance', methods=['PUT'])
-def update_compliance(req_id):
+@inject(require_auth=True)
+def update_compliance(req_id, current_user=None, db=None):
     data = request.json or {}
-    conn = get_db()
-    cursor = conn.cursor()
+    cursor = db.cursor()
 
     cursor.execute("""
         INSERT INTO compliance_records (job_requirement_id, client_nda_shared, client_msa_shared, vendor_nda_shared, vendor_msa_shared, consultant_nda_shared, consultant_msa_shared)
@@ -599,21 +610,18 @@ def update_compliance(req_id):
         1 if data.get('consultant_msa_shared') else 0
     ))
 
-    conn.commit()
-    conn.close()
+    db.commit()
     return jsonify({'message': 'Compliance updated successfully'})
 
 @app.route('/api/requirements/<int:req_id>/compliance/upload', methods=['POST'])
-def upload_compliance_document(req_id):
+@inject(require_auth=True)
+def upload_compliance_document(req_id, current_user=None, db=None):
     """Uploads a signed agreement document, captures uploader details and remark."""
-    conn = get_db()
-    cursor = conn.cursor()
+    cursor = db.cursor()
     cursor.execute("SELECT id, client_name FROM job_requirements WHERE id = ?", (req_id,))
     req = cursor.fetchone()
     if not req:
-        conn.close()
         return jsonify({'error': 'Requirement not found'}), 404
-    conn.close()
 
     agreement_type = request.form.get('agreement_type', '').strip().lower()
     is_signed = request.form.get('is_signed', '1')
@@ -624,9 +632,9 @@ def upload_compliance_document(req_id):
     if agreement_type not in valid_types:
         return jsonify({'error': f'Invalid agreement type. Must be one of: {", ".join(sorted(valid_types))}'}), 400
 
-    # Capture uploader identity from active session (or defaults)
-    uploaded_by = session.get('full_name') or session.get('username') or 'System Administrator'
-    uploaded_by_role = session.get('role') or 'Admin'
+    # Capture uploader identity from active user or defaults
+    uploaded_by = current_user.get('full_name') or current_user.get('username') or 'System Administrator'
+    uploaded_by_role = current_user.get('role') or 'Admin'
 
     file_name = None
     original_name = None
@@ -681,12 +689,14 @@ def upload_compliance_document(req_id):
     }), 201
 
 @app.route('/api/compliance/documents/<path:filename>')
-def serve_compliance_document(filename):
+@inject(require_auth=True)
+def serve_compliance_document(filename, current_user=None):
     """Serves uploaded compliance agreement files securely."""
     return send_from_directory(COMPLIANCE_UPLOAD_FOLDER, filename)
 
 @app.route('/api/requirements/<int:req_id>/compliance/documents', methods=['GET'])
-def get_req_compliance_documents(req_id):
+@inject(require_auth=True)
+def get_req_compliance_documents(req_id, current_user=None, db=None):
     """Returns all compliance documents, uploaders, and remarks for a requirement."""
     docs = get_compliance_documents(req_id)
     for d in docs:
@@ -695,7 +705,8 @@ def get_req_compliance_documents(req_id):
     return jsonify(docs)
 
 @app.route('/api/compliance/documents/<int:doc_id>', methods=['PUT', 'POST'])
-def update_compliance_doc_endpoint(doc_id):
+@inject(require_auth=True)
+def update_compliance_doc_endpoint(doc_id, current_user=None, db=None):
     """Updates remark, is_signed status, or replaces file for an existing compliance document."""
     remark = request.form.get('remark') if request.form else (request.json.get('remark') if request.is_json else None)
     is_signed_raw = request.form.get('is_signed') if request.form else (request.json.get('is_signed') if request.is_json else None)
@@ -738,7 +749,8 @@ def update_compliance_doc_endpoint(doc_id):
     return jsonify({'message': 'Compliance document updated successfully', 'success': True})
 
 @app.route('/api/compliance/documents/<int:doc_id>', methods=['DELETE'])
-def delete_compliance_doc_endpoint(doc_id):
+@inject(require_auth=True)
+def delete_compliance_doc_endpoint(doc_id, current_user=None, db=None):
     """Deletes an existing compliance document."""
     ok, msg = delete_compliance_document(doc_id)
     if not ok:
@@ -746,22 +758,21 @@ def delete_compliance_doc_endpoint(doc_id):
     return jsonify({'message': 'Compliance document deleted successfully', 'success': True})
 
 @app.route('/api/requirements/<int:req_id>', methods=['DELETE'])
-def delete_requirement(req_id):
-    conn = get_db()
-    cursor = conn.cursor()
+@inject(require_auth=True)
+def delete_requirement(req_id, current_user=None, db=None):
+    cursor = db.cursor()
     cursor.execute("DELETE FROM job_requirements WHERE id = ?", (req_id,))
-    conn.commit()
-    conn.close()
+    db.commit()
     return jsonify({'message': 'Requirement deleted successfully'})
 
 # -------------------------------------------------------------------
 # CANDIDATES & RESUME API
 # -------------------------------------------------------------------
 @app.route('/api/candidates', methods=['GET'])
-def get_candidates():
+@inject(require_auth=True)
+def get_candidates(current_user=None, db=None):
     req_id = request.args.get('job_requirement_id')
-    conn = get_db()
-    cursor = conn.cursor()
+    cursor = db.cursor()
 
     if req_id:
         cursor.execute("""
@@ -786,11 +797,11 @@ def get_candidates():
         """)
 
     rows = [dict(row) for row in cursor.fetchall()]
-    conn.close()
     return jsonify(rows)
 
 @app.route('/api/candidates', methods=['POST'])
-def create_candidate():
+@inject(require_auth=True)
+def create_candidate(current_user=None, db=None):
     is_json = request.is_json
     data = request.get_json(silent=True) or {}
     get_val = (lambda k, default='': data.get(k, default)) if is_json else (lambda k, default='': request.form.get(k, default))
@@ -837,8 +848,7 @@ def create_candidate():
             resume_filename = saved_filename
             resume_original_name = file.filename
 
-    conn = get_db()
-    cursor = conn.cursor()
+    cursor = db.cursor()
     cursor.execute("""
         INSERT INTO candidates (
             job_requirement_id, candidate_name, email, phone, current_stage, doj, 
@@ -855,8 +865,7 @@ def create_candidate():
     ))
 
     cand_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
+    db.commit()
 
     # Also store directly in database 'resumes' table
     if resume_filename:
@@ -865,9 +874,9 @@ def create_candidate():
     return jsonify({'message': 'Candidate profile created successfully', 'id': cand_id}), 201
 
 @app.route('/api/candidates/<int:cand_id>', methods=['PUT'])
-def update_candidate(cand_id):
-    conn = get_db()
-    cursor = conn.cursor()
+@inject(require_auth=True)
+def update_candidate(cand_id, current_user=None, db=None):
+    cursor = db.cursor()
 
     is_json = request.is_json
     data = request.get_json(silent=True) or {}
@@ -941,30 +950,29 @@ def update_candidate(cand_id):
             cand_id
         ))
 
-    conn.commit()
-    conn.close()
+    db.commit()
     return jsonify({'message': 'Candidate updated successfully'})
 
 @app.route('/api/candidates/<int:cand_id>/stage', methods=['PATCH', 'PUT'])
-def update_candidate_stage(cand_id):
+@inject(require_auth=True)
+def update_candidate_stage(cand_id, current_user=None, db=None):
     data = request.json or {}
     new_stage = data.get('current_stage') or data.get('stage')
     if not new_stage:
         return jsonify({'error': 'current_stage is required'}), 400
 
-    conn = get_db()
-    cursor = conn.cursor()
+    cursor = db.cursor()
     cursor.execute("""
         UPDATE candidates
         SET current_stage = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
     """, (new_stage, cand_id))
-    conn.commit()
-    conn.close()
+    db.commit()
     return jsonify({'message': 'Candidate stage updated successfully', 'current_stage': new_stage})
 
 @app.route('/api/candidates/<int:cand_id>/resume', methods=['POST'])
-def upload_resume(cand_id):
+@inject(require_auth=True)
+def upload_resume(cand_id, current_user=None, db=None):
     if 'resume' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
 
@@ -981,8 +989,7 @@ def upload_resume(cand_id):
         with open(file_path, 'wb') as f:
             f.write(file_bytes)
 
-        conn = get_db()
-        cursor = conn.cursor()
+        cursor = db.cursor()
         cursor.execute("""
             UPDATE candidates
             SET resume_filename = ?, resume_original_name = ?, updated_at = CURRENT_TIMESTAMP
@@ -992,8 +999,7 @@ def upload_resume(cand_id):
         cursor.execute("SELECT job_requirement_id FROM candidates WHERE id = ?", (cand_id,))
         req_row = cursor.fetchone()
         req_id = req_row[0] if req_row else 1
-        conn.commit()
-        conn.close()
+        db.commit()
 
         # Save to database resumes table
         save_resume_to_db(req_id, cand_id, saved_filename, file.filename, file_bytes, file_path)
@@ -1003,36 +1009,38 @@ def upload_resume(cand_id):
     return jsonify({'error': 'Invalid file format. Allowed: pdf, doc, docx, txt'}), 400
 
 @app.route('/api/resumes/<filename>', methods=['GET'])
-def get_resume_file(filename):
+@inject(require_auth=True)
+def get_resume_file(filename, current_user=None):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=False)
 
 @app.route('/api/candidates/<int:cand_id>', methods=['DELETE'])
-def delete_candidate(cand_id):
-    conn = get_db()
-    cursor = conn.cursor()
+@inject(require_auth=True)
+def delete_candidate(cand_id, current_user=None, db=None):
+    cursor = db.cursor()
     cursor.execute("DELETE FROM candidates WHERE id = ?", (cand_id,))
-    conn.commit()
-    conn.close()
+    db.commit()
     return jsonify({'message': 'Candidate deleted successfully'})
 
 # -------------------------------------------------------------------
 # CANDIDATE PROFILE COMMENTS & MANAGER NOTIFICATIONS API
 # -------------------------------------------------------------------
 @app.route('/api/candidates/<int:cand_id>/comments', methods=['GET'])
-def get_comments_for_candidate(cand_id):
+@inject(require_auth=True)
+def get_comments_for_candidate(cand_id, current_user=None, db=None):
     comments = get_candidate_comments(cand_id)
     return jsonify(comments)
 
 @app.route('/api/candidates/<int:cand_id>/comments', methods=['POST'])
-def create_comment_for_candidate(cand_id):
+@inject(require_auth=True)
+def create_comment_for_candidate(cand_id, current_user=None, db=None):
     data = request.json or {}
     comment_text = data.get('comment_text', '').strip()
     if not comment_text:
         return jsonify({'error': 'Comment or notification text is required.'}), 400
 
-    session_user_id = session.get('user_id')
-    author_name = session.get('full_name') or session.get('username') or data.get('author_name', 'Hiring Manager')
-    author_role = session.get('role') or data.get('author_role', 'Manager')
+    session_user_id = current_user.get('id') if current_user else session.get('user_id')
+    author_name = (current_user.get('full_name') or current_user.get('username')) if current_user else (session.get('full_name') or session.get('username') or data.get('author_name', 'Hiring Manager'))
+    author_role = current_user.get('role') if current_user else (session.get('role') or data.get('author_role', 'Manager'))
     comment_type = data.get('comment_type', 'Comment')
     is_notification = 1 if data.get('is_notification') or comment_type in ['Notification', 'Action Required'] else 0
 
@@ -1063,7 +1071,8 @@ def create_comment_for_candidate(cand_id):
     }), 201
 
 @app.route('/api/notifications', methods=['GET'])
-def list_notifications():
+@inject(require_auth=True)
+def list_notifications(current_user=None, db=None):
     limit = request.args.get('limit', 30, type=int)
     notifications = get_recent_notifications(limit)
     return jsonify(notifications)
@@ -1072,31 +1081,36 @@ def list_notifications():
 # DATABASE MANAGEMENT & EXPORT APIs
 # -------------------------------------------------------------------
 @app.route('/api/database/stats', methods=['GET'])
-def api_database_stats():
+@inject(require_auth=True, roles=['Admin', 'Manager'])
+def api_database_stats(current_user=None, db=None):
     stats = get_database_stats()
     return jsonify(stats)
 
 @app.route('/api/database/table/<table_name>', methods=['GET'])
-def api_database_table(table_name):
+@inject(require_auth=True, roles='Admin')
+def api_database_table(table_name, current_user=None, db=None):
     limit = request.args.get('limit', 100, type=int)
     rows = get_table_rows(table_name, limit)
     return jsonify(rows)
 
 @app.route('/api/database/download-db', methods=['GET'])
-def api_download_db():
+@inject(require_auth=True, roles='Admin')
+def api_download_db(current_user=None):
     if not os.path.exists(DB_PATH):
         return jsonify({'error': 'Database file not found'}), 404
     return send_file(DB_PATH, as_attachment=True, download_name='recruitment_tracker.db')
 
 @app.route('/api/download/project-zip', methods=['GET'])
-def api_download_project_zip():
+@inject(require_auth=True, roles='Admin')
+def api_download_project_zip(current_user=None):
     zip_path = os.path.join(os.path.dirname(__file__), 'job-requirement-tracker.zip')
     if not os.path.exists(zip_path):
         return jsonify({'error': 'Project ZIP file not found'}), 404
     return send_file(zip_path, as_attachment=True, download_name='job-requirement-tracker.zip')
 
 @app.route('/api/database/export-sql', methods=['GET'])
-def api_export_sql():
+@inject(require_auth=True, roles='Admin')
+def api_export_sql(current_user=None, db=None):
     sql_content = export_database_to_sql()
     return Response(
         sql_content,
@@ -1105,7 +1119,8 @@ def api_export_sql():
     )
 
 @app.route('/api/database/schema/<schema_type>', methods=['GET'])
-def api_get_schema_file(schema_type):
+@inject(require_auth=True, roles='Admin')
+def api_get_schema_file(schema_type, current_user=None, db=None):
     file_map = {
         'sqlite': 'schema.sql',
         'mysql': 'schema_mysql.sql',
@@ -1138,9 +1153,9 @@ def extract_number(val):
         return 0.0
 
 @app.route('/api/reports/management', methods=['GET'])
-def get_management_report():
-    conn = get_db()
-    cursor = conn.cursor()
+@inject(require_auth=True, roles=['Admin', 'Manager'])
+def get_management_report(current_user=None, db=None):
+    cursor = db.cursor()
 
     # 1. High-level Summary Metrics
     cursor.execute("SELECT COUNT(*) FROM candidates")
@@ -1255,8 +1270,6 @@ def get_management_report():
 
     overall_closure_rate = round((total_selected / total_positions * 100), 1) if total_positions > 0 else 0
 
-    conn.close()
-
     return jsonify({
         'summary': {
             'total_resumes_shared': total_resumes_shared,
@@ -1277,27 +1290,27 @@ def get_management_report():
 # -------------------------------------------------------------------
 # ADMIN PANEL: USER & MANAGER MANAGEMENT & ROLE/RIGHTS
 # -------------------------------------------------------------------
-def is_admin_authorized():
-    """Checks if the current session has administrative authorization."""
+def is_admin_authorized(user=None):
+    """Checks if the user has administrative authorization."""
+    if user:
+        role = user.get('role')
+        rights = user.get('rights_parsed') or user.get('rights') or {}
+        return role == 'Admin' or bool(rights.get('can_access_admin'))
     role = session.get('role')
     rights = session.get('rights') or {}
     return role == 'Admin' or bool(rights.get('can_access_admin'))
 
 @app.route('/api/admin/users', methods=['GET'])
-def admin_list_users():
+@inject(require_auth=True, roles='Admin')
+def admin_list_users(current_user=None, db=None):
     """Lists all registered users with their roles, emails, and rights."""
-    if not is_admin_authorized():
-        return jsonify({'error': 'Unauthorized. Administrator privileges required.'}), 403
-
     users = get_all_users()
     return jsonify(users)
 
 @app.route('/api/admin/users', methods=['POST'])
-def admin_create_user():
+@inject(require_auth=True, roles='Admin')
+def admin_create_user(current_user=None, db=None):
     """Creates a new User or Manager account with assigned rights."""
-    if not is_admin_authorized():
-        return jsonify({'error': 'Unauthorized. Administrator privileges required.'}), 403
-
     data = request.json or {}
     username = data.get('username', '').strip()
     email = data.get('email', '').strip()
@@ -1327,11 +1340,9 @@ def admin_create_user():
     }), 201
 
 @app.route('/api/admin/users/<int:user_id>', methods=['PUT'])
-def admin_update_user_endpoint(user_id):
+@inject(require_auth=True, roles='Admin')
+def admin_update_user_endpoint(user_id, current_user=None, db=None):
     """Updates user roles, corporate email, full name, rights, and status."""
-    if not is_admin_authorized():
-        return jsonify({'error': 'Unauthorized. Administrator privileges required.'}), 403
-
     data = request.json or {}
     email = data.get('email')
     full_name = data.get('full_name')
@@ -1344,7 +1355,8 @@ def admin_update_user_endpoint(user_id):
         return jsonify({'error': msg}), 400
 
     updated_user = get_user_by_id(user_id)
-    if session.get('user_id') == user_id and updated_user:
+    active_id = current_user.get('id') if current_user else session.get('user_id')
+    if active_id == user_id and updated_user:
         session['role'] = updated_user.get('role', session.get('role'))
         session['full_name'] = updated_user.get('full_name', session.get('full_name'))
         session['rights'] = updated_user.get('rights', session.get('rights'))
@@ -1355,11 +1367,9 @@ def admin_update_user_endpoint(user_id):
     })
 
 @app.route('/api/admin/users/<int:user_id>/reset-password', methods=['POST'])
-def admin_reset_password_endpoint(user_id):
+@inject(require_auth=True, roles='Admin')
+def admin_reset_password_endpoint(user_id, current_user=None, db=None):
     """Resets user password directly from admin panel."""
-    if not is_admin_authorized():
-        return jsonify({'error': 'Unauthorized. Administrator privileges required.'}), 403
-
     data = request.json or {}
     new_password = data.get('new_password', '').strip()
     if not new_password or len(new_password) < 6:
@@ -1372,12 +1382,11 @@ def admin_reset_password_endpoint(user_id):
     return jsonify({'message': msg})
 
 @app.route('/api/admin/users/<int:user_id>', methods=['DELETE'])
-def admin_delete_user_endpoint(user_id):
+@inject(require_auth=True, roles='Admin')
+def admin_delete_user_endpoint(user_id, current_user=None, db=None):
     """Deletes a user account (with protection for primary admin)."""
-    if not is_admin_authorized():
-        return jsonify({'error': 'Unauthorized. Administrator privileges required.'}), 403
-
-    if session.get('user_id') == user_id:
+    active_id = current_user.get('id') if current_user else session.get('user_id')
+    if active_id == user_id:
         return jsonify({'error': 'You cannot delete your own active administrator account.'}), 400
 
     success, msg = delete_user(user_id)
@@ -1390,16 +1399,15 @@ def admin_delete_user_endpoint(user_id):
 # SYSTEM SETTINGS API (CURRENCY / EXCHANGE RATE)
 # ==========================================
 @app.route('/api/settings', methods=['GET'])
-def get_settings_endpoint():
+@inject(require_auth=True)
+def get_settings_endpoint(current_user=None, db=None):
     """Returns system settings including USD/INR exchange rate."""
     return jsonify(get_all_system_settings())
 
 @app.route('/api/settings', methods=['PUT'])
-def update_settings_endpoint():
-    """Updates system settings like usd_inr_exchange_rate (Admin only)."""
-    if not is_admin_authorized():
-        return jsonify({'error': 'Unauthorized. Administrator privileges required.'}), 403
-
+@inject(require_auth=True, roles=['Admin', 'Manager'])
+def update_settings_endpoint(current_user=None, db=None):
+    """Updates system settings like usd_inr_exchange_rate (Admin/Manager only)."""
     data = request.json or {}
     for key, value in data.items():
         set_system_setting(key, value)

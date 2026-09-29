@@ -472,15 +472,15 @@
 
                     <!-- Direct Download / Backup Action Buttons -->
                     <div class="flex flex-wrap items-center gap-2">
-                        <a href="/api/download/project-zip" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs px-3.5 py-2 rounded-lg shadow flex items-center space-x-1.5 transition" title="Download Complete Web Application ZIP for Web Hosting">
+                        <a href="#" onclick="event.preventDefault(); window.location.href=getFileUrl('/api/download/project-zip');" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs px-3.5 py-2 rounded-lg shadow flex items-center space-x-1.5 transition" title="Download Complete Web Application ZIP for Web Hosting">
                             <i class="fa-solid fa-file-zipper"></i>
                             <span>Download Project (.ZIP)</span>
                         </a>
-                        <a href="/api/database/download-db" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-3.5 py-2 rounded-lg shadow flex items-center space-x-1.5 transition">
+                        <a href="#" onclick="event.preventDefault(); window.location.href=getFileUrl('/api/database/download-db');" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-3.5 py-2 rounded-lg shadow flex items-center space-x-1.5 transition">
                             <i class="fa-solid fa-download"></i>
                             <span>Download Database (.db)</span>
                         </a>
-                        <a href="/api/database/export-sql" class="bg-slate-800 hover:bg-slate-900 text-white font-semibold text-xs px-3.5 py-2 rounded-lg shadow flex items-center space-x-1.5 transition">
+                        <a href="#" onclick="event.preventDefault(); window.location.href=getFileUrl('/api/database/export-sql');" class="bg-slate-800 hover:bg-slate-900 text-white font-semibold text-xs px-3.5 py-2 rounded-lg shadow flex items-center space-x-1.5 transition">
                             <i class="fa-solid fa-file-code"></i>
                             <span>Export SQL Dump (.sql)</span>
                         </a>
@@ -2199,6 +2199,72 @@
         });
 
         // -------------------------------------------------------------------
+        // ACCESS TOKEN MANAGEMENT & GLOBAL FETCH INTERCEPTOR
+        // -------------------------------------------------------------------
+        function getAccessToken() {
+            return localStorage.getItem('kd_access_token') || '';
+        }
+
+        function setAccessToken(token) {
+            if (token) {
+                localStorage.setItem('kd_access_token', token);
+            } else {
+                localStorage.removeItem('kd_access_token');
+            }
+        }
+
+        function getFileUrl(baseUrl) {
+            if (!baseUrl) return '';
+            const token = getAccessToken();
+            if (!token) return baseUrl;
+            const separator = baseUrl.includes('?') ? '&' : '?';
+            return `${baseUrl}${separator}token=${encodeURIComponent(token)}`;
+        }
+
+        // Install Global Fetch Interceptor to inject Bearer Access Token into all API calls
+        const _nativeFetch = window.fetch;
+        window.fetch = async function(url, options = {}) {
+            const token = getAccessToken();
+            const isApi = (typeof url === 'string') && (url.startsWith('/api/') || url.includes('/api/'));
+            const isAuthLogin = (typeof url === 'string') && (url.includes('/api/auth/login') || url.includes('/api/auth/microsoft-login'));
+
+            if (token && isApi && !isAuthLogin) {
+                options = options || {};
+                if (!options.headers) {
+                    options.headers = {};
+                }
+                if (options.headers instanceof Headers) {
+                    if (!options.headers.has('Authorization')) {
+                        options.headers.set('Authorization', `Bearer ${token}`);
+                    }
+                } else if (Array.isArray(options.headers)) {
+                    options.headers.push(['Authorization', `Bearer ${token}`]);
+                } else {
+                    if (!options.headers['Authorization']) {
+                        options.headers['Authorization'] = `Bearer ${token}`;
+                    }
+                }
+            }
+
+            const response = await _nativeFetch(url, options);
+
+            // Handle 401 Unauthorized globally: session expired / invalid token
+            if (response.status === 401 && isApi && !isAuthLogin) {
+                console.warn("API 401 Unauthorized received. Clearing token and prompting login.");
+                setAccessToken(null);
+                currentUser = null;
+                showLogin();
+                const alertBox = document.getElementById('loginAlert');
+                if (alertBox) {
+                    alertBox.innerText = 'Session expired or unauthorized. Please sign in with your credentials.';
+                    alertBox.classList.remove('hidden');
+                }
+            }
+
+            return response;
+        };
+
+        // -------------------------------------------------------------------
         // AUTHENTICATION & SESSION MANAGEMENT
         // -------------------------------------------------------------------
         async function checkAuth() {
@@ -2296,6 +2362,9 @@
                 });
                 const data = await res.json();
                 if (res.ok && data.user) {
+                    if (data.access_token) {
+                        setAccessToken(data.access_token);
+                    }
                     currentUser = data.user;
                     showApp();
                 } else {
@@ -2316,6 +2385,7 @@
             try {
                 await fetch('/api/auth/logout', { method: 'POST' });
             } catch (err) {}
+            setAccessToken(null);
             currentUser = null;
             showLogin();
         }
@@ -2780,7 +2850,7 @@
                                                                 `<span class="text-[9px] font-bold text-purple-700 bg-purple-100 border border-purple-200 px-1.5 py-0.5 rounded-full flex items-center" title="Vendor Sourced"><i class="fa-solid fa-handshake mr-1"></i>Vendor: ${c.vendor_name || 'Agency'}</span>` : 
                                                                 `<span class="text-[9px] font-bold text-sky-700 bg-sky-100 border border-sky-200 px-1.5 py-0.5 rounded-full flex items-center" title="Internal Sourced"><i class="fa-solid fa-building-user mr-1"></i>Internal</span>`}
                                                             ${c.resume_filename ? `
-                                                                <a href="/api/resumes/${c.resume_filename}" target="_blank" class="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100 flex items-center" title="Download Resume">
+                                                                <a href="${getFileUrl('/api/resumes/' + c.resume_filename)}" target="_blank" class="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100 flex items-center" title="Download Resume">
                                                                     <i class="fa-solid fa-file-pdf mr-1 text-red-500"></i> Resume
                                                                 </a>
                                                             ` : ''}
@@ -3250,7 +3320,7 @@
                         </td>
                         <td class="p-4 text-xs">
                             ${c.resume_filename ? `
-                                <a href="/api/resumes/${c.resume_filename}" target="_blank" class="inline-flex items-center space-x-1 text-indigo-600 hover:text-indigo-800 font-semibold bg-indigo-50 px-2.5 py-1 rounded border border-indigo-100">
+                                <a href="${getFileUrl('/api/resumes/' + c.resume_filename)}" target="_blank" class="inline-flex items-center space-x-1 text-indigo-600 hover:text-indigo-800 font-semibold bg-indigo-50 px-2.5 py-1 rounded border border-indigo-100">
                                     <i class="fa-solid fa-file-pdf text-rose-500"></i>
                                     <span>${c.resume_original_name || 'View Resume'}</span>
                                 </a>
@@ -3518,7 +3588,7 @@
                                     </span>
                                 </div>
                                 ${doc && doc.download_url ? `
-                                    <a href="${doc.download_url}" target="_blank" class="inline-flex items-center text-[10px] font-bold text-indigo-700 hover:text-indigo-900 bg-white border border-indigo-200 rounded px-1.5 py-0.5 shadow-sm max-w-[135px] truncate transition hover:bg-indigo-50" title="${escapeComplianceHtml(doc.original_name || 'Download Document')}">
+                                    <a href="${getFileUrl(doc.download_url)}" target="_blank" class="inline-flex items-center text-[10px] font-bold text-indigo-700 hover:text-indigo-900 bg-white border border-indigo-200 rounded px-1.5 py-0.5 shadow-sm max-w-[135px] truncate transition hover:bg-indigo-50" title="${escapeComplianceHtml(doc.original_name || 'Download Document')}">
                                         <i class="fa-solid fa-file-pdf text-red-500 mr-1 text-[11px]"></i>
                                         <span class="truncate">${escapeComplianceHtml(doc.original_name || 'View Doc')}</span>
                                     </a>
@@ -4282,7 +4352,7 @@
             `;
             if (candidate.resume_filename) {
                 ribbonHtml += `
-                    <a href="/api/resumes/${candidate.resume_filename}" target="_blank" class="text-indigo-600 hover:text-indigo-800 font-bold flex items-center bg-white px-2 py-1 rounded border border-indigo-200 shadow-sm">
+                    <a href="${getFileUrl('/api/resumes/' + candidate.resume_filename)}" target="_blank" class="text-indigo-600 hover:text-indigo-800 font-bold flex items-center bg-white px-2 py-1 rounded border border-indigo-200 shadow-sm">
                         <i class="fa-solid fa-file-pdf text-rose-500 mr-1.5"></i> View Resume
                     </a>
                 `;
@@ -5055,7 +5125,7 @@
                 <span class="font-medium text-slate-700">&copy; Key Dynamics Solutions. All rights reserved.</span>
             </div>
             <div class="flex items-center space-x-3">
-                <a href="/api/download/project-zip" class="text-indigo-600 hover:text-indigo-800 font-bold flex items-center space-x-1.5 transition" title="Download Full Project ZIP Archive">
+                <a href="#" onclick="event.preventDefault(); window.location.href=getFileUrl('/api/download/project-zip');" class="text-indigo-600 hover:text-indigo-800 font-bold flex items-center space-x-1.5 transition" title="Download Full Project ZIP Archive">
                     <i class="fa-solid fa-file-zipper text-emerald-600"></i>
                     <span>Download Project (.ZIP)</span>
                 </a>
