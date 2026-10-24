@@ -1,8 +1,15 @@
 import sqlite3
 import os
+import re
 import json
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
+
+try:
+    import pymysql
+    import pymysql.cursors
+except ImportError:
+    pymysql = None
 
 ORIGINAL_DB_PATH = os.path.join(os.path.dirname(__file__), 'recruitment_tracker.db')
 
@@ -18,6 +25,153 @@ if os.environ.get('VERCEL') == '1' or os.environ.get('AWS_LAMBDA_FUNCTION_NAME')
                 print("Notice: Error copying database to /tmp:", e)
 else:
     DB_PATH = ORIGINAL_DB_PATH
+
+# -------------------------------------------------------------------
+# DATABASE ENGINE DETECTION & MYSQL WRAPPER
+# -------------------------------------------------------------------
+def get_mysql_config():
+    """Extracts MySQL connection parameters from environment variables."""
+    db_url = os.environ.get('DATABASE_URL', '')
+    if db_url and (db_url.startswith('mysql://') or db_url.startswith('mysql+pymysql://')):
+        from urllib.parse import urlparse
+        parsed = urlparse(db_url)
+        return {
+            'host': parsed.hostname or 'localhost',
+            'port': parsed.port or 3306,
+            'user': parsed.username or 'root',
+            'password': parsed.password or '',
+            'database': parsed.path.lstrip('/') if parsed.path else 'recruitment_tracker'
+        }
+    return {
+        'host': os.environ.get('MYSQL_HOST') or os.environ.get('DB_HOST', 'localhost'),
+        'port': int(os.environ.get('MYSQL_PORT') or os.environ.get('DB_PORT', 3306)),
+        'user': os.environ.get('MYSQL_USER') or os.environ.get('DB_USER', 'root'),
+        'password': os.environ.get('MYSQL_PASSWORD') or os.environ.get('DB_PASSWORD', ''),
+        'database': os.environ.get('MYSQL_DATABASE') or os.environ.get('DB_NAME', 'recruitment_tracker')
+    }
+
+def is_mysql_enabled():
+    """Checks whether the application should use MySQL or SQLite."""
+    engine = os.environ.get('DB_ENGINE', '').lower()
+    if engine == 'mysql':
+        return True
+    db_url = os.environ.get('DATABASE_URL', '')
+    if db_url.startswith('mysql://') or db_url.startswith('mysql+pymysql://'):
+        return True
+    if os.environ.get('MYSQL_HOST') and engine != 'sqlite':
+        return True
+    return False
+
+class UniversalRow(dict):
+    """Row object supporting both dictionary key access (row['id']) and index access (row[0])."""
+    def __init__(self, d, keys_order=None):
+        super().__init__(d)
+        self._keys_order = keys_order or list(d.keys())
+
+    def __getitem__(self, item):
+        if isinstance(item, int):
+            return super().__getitem__(self._keys_order[item])
+        return super().__getitem__(item)
+
+class MySQLCursorWrapper:
+    """Wraps PyMySQL cursor to seamlessly translate SQLite queries and return UniversalRow objects."""
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    @property
+    def lastrowid(self):
+        return self._cursor.lastrowid
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    @property
+    def description(self):
+        return self._cursor.description
+
+    def _convert_sql(self, sql):
+        # 1. Parameter placeholder ? -> %s
+        sql = sql.replace('?', '%s')
+        # 2. INSERT OR IGNORE INTO -> INSERT IGNORE INTO
+        sql = re.sub(r'INSERT\s+OR\s+IGNORE\s+INTO', 'INSERT IGNORE INTO', sql, flags=re.IGNORECASE)
+        # 3. ON CONFLICT(key) DO UPDATE SET value = excluded.value -> ON DUPLICATE KEY UPDATE value = VALUES(value)
+        sql = re.sub(
+            r'ON\s+CONFLICT\s*\([^\)]+\)\s*DO\s+UPDATE\s+SET\s+value\s*=\s*excluded\.value(?:,\s*updated_at\s*=\s*CURRENT_TIMESTAMP)?',
+            'ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = CURRENT_TIMESTAMP',
+            sql,
+            flags=re.IGNORECASE
+        )
+        # 4. PRAGMA table_info(x) -> SHOW COLUMNS FROM x
+        m = re.match(r'PRAGMA\s+table_info\s*\(\s*([a-zA-Z0-9_]+)\s*\)', sql.strip(), re.IGNORECASE)
+        if m:
+            table = m.group(1)
+            sql = f"SHOW COLUMNS FROM `{table}`"
+        # 5. AUTOINCREMENT -> AUTO_INCREMENT
+        sql = sql.replace('AUTOINCREMENT', 'AUTO_INCREMENT')
+        # 6. Escape reserved keyword `key` in system_settings if not already backticked
+        sql = re.sub(r'(?<=\s)key(?=\s*[,=])', '`key`', sql, flags=re.IGNORECASE)
+        sql = re.sub(r'\(([^)]*\b)key(\b[^)]*)\)', r'(\1`key`\2)', sql, flags=re.IGNORECASE)
+        return sql
+
+    def execute(self, query, params=None):
+        converted = self._convert_sql(query)
+        if params is not None:
+            return self._cursor.execute(converted, params)
+        return self._cursor.execute(converted)
+
+    def executemany(self, query, seq_of_params):
+        converted = self._convert_sql(query)
+        return self._cursor.executemany(converted, seq_of_params)
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        if row is None:
+            return None
+        keys = [desc[0] for desc in self._cursor.description] if self._cursor.description else list(row.keys())
+        return UniversalRow(row, keys)
+
+    def fetchall(self):
+        rows = self._cursor.fetchall()
+        if not rows:
+            return []
+        keys = [desc[0] for desc in self._cursor.description] if self._cursor.description else list(rows[0].keys())
+        return [UniversalRow(r, keys) for r in rows]
+
+    def close(self):
+        return self._cursor.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+class MySQLConnectionWrapper:
+    """Wraps PyMySQL connection to provide cursor() and commit()/rollback()."""
+    def __init__(self, raw_conn):
+        self._conn = raw_conn
+
+    def cursor(self):
+        raw_cur = self._conn.cursor(pymysql.cursors.DictCursor)
+        return MySQLCursorWrapper(raw_cur)
+
+    def execute(self, sql, params=None):
+        cur = self.cursor()
+        cur.execute(sql, params)
+        return cur
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def close(self):
+        return self._conn.close()
+
+    def iterdump(self):
+        return [export_database_to_sql()]
 
 def get_default_rights(role):
     """Returns standard rights mapping for a given role."""
@@ -54,6 +208,22 @@ def get_default_rights(role):
         }
 
 def get_db():
+    if is_mysql_enabled():
+        if pymysql is None:
+            raise RuntimeError("PyMySQL is required for MySQL database connection. Run: pip install pymysql")
+        cfg = get_mysql_config()
+        raw_conn = pymysql.connect(
+            host=cfg['host'],
+            port=cfg['port'],
+            user=cfg['user'],
+            password=cfg['password'],
+            database=cfg['database'],
+            charset='utf8mb4',
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=False
+        )
+        return MySQLConnectionWrapper(raw_conn)
+
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -63,7 +233,49 @@ def get_db():
         pass
     return conn
 
+def init_mysql_db():
+    """Initializes MySQL database and executes schema_mysql.sql."""
+    cfg = get_mysql_config()
+    try:
+        root_conn = pymysql.connect(
+            host=cfg['host'],
+            port=cfg['port'],
+            user=cfg['user'],
+            password=cfg['password'],
+            charset='utf8mb4',
+            autocommit=True
+        )
+        with root_conn.cursor() as cur:
+            cur.execute(f"CREATE DATABASE IF NOT EXISTS `{cfg['database']}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;")
+        root_conn.close()
+    except Exception as e:
+        print(f"[Notice] MySQL database check warning: {e}")
+
+    schema_file = os.path.join(os.path.dirname(__file__), 'schema_mysql.sql')
+    if os.path.exists(schema_file):
+        conn = get_db()
+        with open(schema_file, 'r', encoding='utf-8') as f:
+            sql = f.read()
+        statements = [stmt.strip() for stmt in sql.split(';') if stmt.strip()]
+        cur = conn.cursor()
+        cur.execute("SET FOREIGN_KEY_CHECKS = 0;")
+        for stmt in statements:
+            if stmt.upper().startswith("CREATE DATABASE") or stmt.upper().startswith("USE "):
+                continue
+            try:
+                cur.execute(stmt)
+            except Exception as e:
+                if "Duplicate entry" not in str(e):
+                    pass
+        cur.execute("SET FOREIGN_KEY_CHECKS = 1;")
+        conn.commit()
+        conn.close()
+
 def init_db():
+    if is_mysql_enabled():
+        init_mysql_db()
+        return
+
     conn = get_db()
     cursor = conn.cursor()
 
@@ -342,10 +554,15 @@ def get_database_stats():
 
     for table in tables:
         try:
-            cursor.execute(f"SELECT COUNT(*) FROM {table}")
-            count = cursor.fetchone()[0]
-            cursor.execute(f"PRAGMA table_info({table})")
-            columns = [dict(col) for col in cursor.fetchall()]
+            cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
+            row = cursor.fetchone()
+            count = row[0] if row else 0
+            if is_mysql_enabled():
+                cursor.execute(f"SHOW COLUMNS FROM `{table}`")
+                columns = [{'name': col['Field'], 'type': col['Type']} for col in cursor.fetchall()]
+            else:
+                cursor.execute(f"PRAGMA table_info({table})")
+                columns = [dict(col) for col in cursor.fetchall()]
             stats[table] = {
                 'row_count': count,
                 'columns': columns
@@ -355,8 +572,20 @@ def get_database_stats():
 
     conn.close()
 
+    if is_mysql_enabled():
+        cfg = get_mysql_config()
+        return {
+            'database_engine': 'MySQL',
+            'database_file': cfg.get('database', 'recruitment_tracker'),
+            'database_path': f"{cfg.get('user')}@{cfg.get('host')}:{cfg.get('port')}/{cfg.get('database')}",
+            'size_bytes': 0,
+            'size_formatted': 'MySQL Server / Cloud Database',
+            'tables': stats
+        }
+
     db_size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
     return {
+        'database_engine': 'SQLite',
         'database_file': os.path.basename(DB_PATH),
         'database_path': DB_PATH,
         'size_bytes': db_size,
@@ -376,14 +605,57 @@ def get_table_rows(table_name, limit=100):
     if table_name == 'resumes':
         cursor.execute("SELECT id, job_requirement_id, candidate_id, file_name, original_name, file_type, file_size, file_path, uploaded_at FROM resumes ORDER BY id DESC LIMIT ?", (limit,))
     else:
-        cursor.execute(f"SELECT * FROM {table_name} ORDER BY id DESC LIMIT ?", (limit,))
+        cursor.execute(f"SELECT * FROM `{table_name}` ORDER BY id DESC LIMIT ?", (limit,))
     
     rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
     return rows
 
+def export_mysql_to_sql():
+    """Generates a complete SQL dump of the MySQL database."""
+    schema_file = os.path.join(os.path.dirname(__file__), 'schema_mysql.sql')
+    dump_lines = [
+        "-- =============================================================================",
+        "-- RECRUITMENT TRACKER: MySQL Database Backup Dump",
+        f"-- Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "-- =============================================================================\n"
+    ]
+    if os.path.exists(schema_file):
+        with open(schema_file, 'r', encoding='utf-8') as f:
+            dump_lines.append(f.read())
+        dump_lines.append("\n-- Data Export:\n")
+    
+    conn = get_db()
+    cur = conn.cursor()
+    tables = ['system_settings', 'users', 'job_requirements', 'compliance_records', 'candidates', 'resumes', 'candidate_comments', 'compliance_documents']
+    for t in tables:
+        try:
+            cur.execute(f"SELECT * FROM `{t}`")
+            rows = cur.fetchall()
+            if rows:
+                dump_lines.append(f"-- Table `{t}`: {len(rows)} records")
+                for r in rows:
+                    cols = [f"`{k}`" for k in r.keys()]
+                    vals = []
+                    for v in r.values():
+                        if v is None:
+                            vals.append("NULL")
+                        elif isinstance(v, (int, float)):
+                            vals.append(str(v))
+                        else:
+                            clean = str(v).replace("'", "''").replace('\\', '\\\\')
+                            vals.append(f"'{clean}'")
+                    dump_lines.append(f"INSERT INTO `{t}` ({', '.join(cols)}) VALUES ({', '.join(vals)});")
+                dump_lines.append("")
+        except Exception:
+            pass
+    conn.close()
+    return '\n'.join(dump_lines)
+
 def export_database_to_sql():
     """Generates a complete SQL dump of the database."""
+    if is_mysql_enabled():
+        return export_mysql_to_sql()
     conn = get_db()
     dump_lines = []
     for line in conn.iterdump():
@@ -837,7 +1109,10 @@ def get_system_setting(key, default='84.00'):
     """Retrieves a system configuration setting."""
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+    if is_mysql_enabled():
+        cursor.execute("SELECT value FROM system_settings WHERE `key` = %s", (key,))
+    else:
+        cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
     if row:
@@ -848,11 +1123,18 @@ def set_system_setting(key, value):
     """Updates or sets a system configuration setting."""
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO system_settings (key, value, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-    ''', (key, str(value)))
+    if is_mysql_enabled():
+        cursor.execute('''
+            INSERT INTO system_settings (`key`, value, updated_at)
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
+            ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = CURRENT_TIMESTAMP
+        ''', (key, str(value)))
+    else:
+        cursor.execute('''
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+        ''', (key, str(value)))
     conn.commit()
     conn.close()
     return True
@@ -861,7 +1143,10 @@ def get_all_system_settings():
     """Returns all system configuration settings as a dict."""
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT key, value, updated_at FROM system_settings")
+    if is_mysql_enabled():
+        cursor.execute("SELECT `key`, value, updated_at FROM system_settings")
+    else:
+        cursor.execute("SELECT key, value, updated_at FROM system_settings")
     rows = cursor.fetchall()
     conn.close()
     settings = {}
