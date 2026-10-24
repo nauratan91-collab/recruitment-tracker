@@ -1,0 +1,58 @@
+# ==============================================================================
+# GoDaddy cPanel / Apache Web Server Configuration
+# ==============================================================================
+
+# 1. Security: Disable Directory Browsing and Server Signatures
+Options -Indexes
+ServerSignature Off
+
+# 2. Block direct HTTP web access to sensitive database, env, and source files
+<FilesMatch "^(\.env|\.git|\.gitignore|.*\.db|.*\.sql|.*\.log|requirements\.txt|Procfile|render\.yaml|vercel\.json)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order deny,allow
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# 3. Increase File Upload limits for Resume and Compliance PDFs
+<IfModule mod_php.c>
+    php_value upload_max_filesize 25M
+    php_value post_max_size 30M
+    php_value memory_limit 256M
+</IfModule>
+
+# 4. UTF-8 Character Encoding
+AddDefaultCharset UTF-8
+
+# 5. Enable HTTPS Redirection (Auto-redirect HTTP to secure HTTPS)
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{HTTPS} off
+    RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+</IfModule>
+
+# 6. Gzip / Deflate Compression for Speed & Performance
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css text/javascript application/javascript application/json
+</IfModule>
+
+# 7. Browser Caching for Static Assets (CSS, JS, Fonts, Images)
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css "access plus 1 month"
+    ExpiresByType application/javascript "access plus 1 month"
+    ExpiresByType image/jpeg "access plus 1 month"
+    ExpiresByType image/png "access plus 1 month"
+    ExpiresByType image/svg+xml "access plus 1 month"
+</IfModule>
+
+# 8. Phusion Passenger Directives (cPanel Python App)
+<IfModule mod_passenger.c>
+    PassengerAppRoot .
+    PassengerBaseURI /
+    PassengerAppType wsgi
+    PassengerStartupFile passenger_wsgi.py
+</IfModule>

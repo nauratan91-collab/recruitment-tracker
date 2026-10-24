@@ -1,0 +1,16 @@
+[Unit]
+Description=Key Dynamics Recruitment Tracker Flask Application (Gunicorn)
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/recruitment-tracker
+Environment="PATH=/var/www/recruitment-tracker/venv/bin"
+EnvironmentFile=/var/www/recruitment-tracker/.env
+ExecStart=/var/www/recruitment-tracker/venv/bin/gunicorn --workers 3 --bind 127.0.0.1:5000 passenger_wsgi:application
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -5,6 +5,22 @@ import json
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 
+# Auto-load .env file if present
+_env_path = os.path.join(os.path.dirname(__file__), '.env')
+if os.path.exists(_env_path):
+    try:
+        with open(_env_path, 'r', encoding='utf-8') as _ef:
+            for _line in _ef:
+                _line = _line.strip()
+                if _line and not _line.startswith('#') and '=' in _line:
+                    _k, _v = _line.split('=', 1)
+                    _k = _k.strip()
+                    _v = _v.strip().strip("'").strip('"')
+                    if _k not in os.environ:
+                        os.environ[_k] = _v
+    except Exception:
+        pass
+
 try:
     import pymysql
     import pymysql.cursors
@@ -50,8 +66,13 @@ def get_mysql_config():
         'database': os.environ.get('MYSQL_DATABASE') or os.environ.get('DB_NAME', 'recruitment_tracker')
     }
 
+_MYSQL_UNAVAILABLE = False
+
 def is_mysql_enabled():
     """Checks whether the application should use MySQL or SQLite."""
+    global _MYSQL_UNAVAILABLE
+    if _MYSQL_UNAVAILABLE:
+        return False
     engine = os.environ.get('DB_ENGINE', '').lower()
     if engine == 'mysql':
         return True
@@ -61,6 +82,10 @@ def is_mysql_enabled():
     if os.environ.get('MYSQL_HOST') and engine != 'sqlite':
         return True
     return False
+
+def is_mysql_conn(conn):
+    """Returns True if connection is a MySQLConnectionWrapper instance."""
+    return isinstance(conn, MySQLConnectionWrapper)
 
 class UniversalRow(dict):
     """Row object supporting both dictionary key access (row['id']) and index access (row[0])."""
@@ -207,22 +232,32 @@ def get_default_rights(role):
             'can_access_admin': False
         }
 
+_MYSQL_UNAVAILABLE = False
+
 def get_db():
-    if is_mysql_enabled():
+    global _MYSQL_UNAVAILABLE
+    if is_mysql_enabled() and not _MYSQL_UNAVAILABLE:
         if pymysql is None:
             raise RuntimeError("PyMySQL is required for MySQL database connection. Run: pip install pymysql")
         cfg = get_mysql_config()
-        raw_conn = pymysql.connect(
-            host=cfg['host'],
-            port=cfg['port'],
-            user=cfg['user'],
-            password=cfg['password'],
-            database=cfg['database'],
-            charset='utf8mb4',
-            cursorclass=pymysql.cursors.DictCursor,
-            autocommit=False
-        )
-        return MySQLConnectionWrapper(raw_conn)
+        try:
+            raw_conn = pymysql.connect(
+                host=cfg['host'],
+                port=cfg['port'],
+                user=cfg['user'],
+                password=cfg['password'],
+                database=cfg['database'],
+                charset='utf8mb4',
+                cursorclass=pymysql.cursors.DictCursor,
+                autocommit=False,
+                connect_timeout=2
+            )
+            return MySQLConnectionWrapper(raw_conn)
+        except Exception as e:
+            if os.environ.get('STRICT_MYSQL', '').lower() in ('1', 'true'):
+                raise
+            _MYSQL_UNAVAILABLE = True
+            print(f"[Warning] MySQL connection to {cfg['host']}:{cfg['port']} failed ({e}). Falling back to SQLite.")
 
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
@@ -273,8 +308,13 @@ def init_mysql_db():
 
 def init_db():
     if is_mysql_enabled():
-        init_mysql_db()
-        return
+        try:
+            init_mysql_db()
+            return
+        except Exception as e:
+            if os.environ.get('STRICT_MYSQL', '').lower() in ('1', 'true'):
+                raise
+            print(f"[Warning] MySQL initialization failed ({e}). Falling back to SQLite initialization.")
 
     conn = get_db()
     cursor = conn.cursor()
@@ -557,7 +597,7 @@ def get_database_stats():
             cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
             row = cursor.fetchone()
             count = row[0] if row else 0
-            if is_mysql_enabled():
+            if is_mysql_conn(conn):
                 cursor.execute(f"SHOW COLUMNS FROM `{table}`")
                 columns = [{'name': col['Field'], 'type': col['Type']} for col in cursor.fetchall()]
             else:
@@ -570,9 +610,10 @@ def get_database_stats():
         except Exception as e:
             stats[table] = {'row_count': 0, 'columns': [], 'error': str(e)}
 
+    is_mysql_active = is_mysql_conn(conn)
     conn.close()
 
-    if is_mysql_enabled():
+    if is_mysql_active:
         cfg = get_mysql_config()
         return {
             'database_engine': 'MySQL',
@@ -1109,7 +1150,7 @@ def get_system_setting(key, default='84.00'):
     """Retrieves a system configuration setting."""
     conn = get_db()
     cursor = conn.cursor()
-    if is_mysql_enabled():
+    if is_mysql_conn(conn):
         cursor.execute("SELECT value FROM system_settings WHERE `key` = %s", (key,))
     else:
         cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
@@ -1123,7 +1164,7 @@ def set_system_setting(key, value):
     """Updates or sets a system configuration setting."""
     conn = get_db()
     cursor = conn.cursor()
-    if is_mysql_enabled():
+    if is_mysql_conn(conn):
         cursor.execute('''
             INSERT INTO system_settings (`key`, value, updated_at)
             VALUES (%s, %s, CURRENT_TIMESTAMP)
@@ -1143,7 +1184,7 @@ def get_all_system_settings():
     """Returns all system configuration settings as a dict."""
     conn = get_db()
     cursor = conn.cursor()
-    if is_mysql_enabled():
+    if is_mysql_conn(conn):
         cursor.execute("SELECT `key`, value, updated_at FROM system_settings")
     else:
         cursor.execute("SELECT key, value, updated_at FROM system_settings")
