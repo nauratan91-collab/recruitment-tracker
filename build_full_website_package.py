@@ -125,10 +125,35 @@ def build_package():
 
         // Override window.fetch to provide zero-backend autonomous REST execution
         const originalFetch = window.fetch;
+        let _serverBackendAvailable = null;
+
+        async function checkServerBackend() {{
+            if (_serverBackendAvailable !== null) return _serverBackendAvailable;
+            try {{
+                const testRes = await originalFetch('/api/settings', {{ method: 'GET' }});
+                _serverBackendAvailable = (testRes.status !== 404 && testRes.status !== 405 && testRes.status !== 502 && testRes.status !== 503);
+            }} catch (e) {{
+                _serverBackendAvailable = false;
+            }}
+            return _serverBackendAvailable;
+        }}
+
         window.fetch = async function(resource, config = {{}}) {{
             let url = typeof resource === 'string' ? resource : (resource ? resource.url : '');
             if (!url.startsWith('/api/') && !url.startsWith('api/')) {{
                 return originalFetch(resource, config);
+            }}
+
+            const isServerLive = await checkServerBackend();
+            if (isServerLive) {{
+                try {{
+                    const realRes = await originalFetch(resource, config);
+                    if (realRes.status !== 404 && realRes.status !== 405) {{
+                        return realRes;
+                    }}
+                }} catch (netErr) {{
+                    // Fall back to client storage only on network error
+                }}
             }}
 
             const path = url.startsWith('/') ? url.split('?')[0] : ('/' + url.split('?')[0]);

@@ -2,6 +2,9 @@
 # GoDaddy cPanel / Apache Web Server Configuration
 # ==============================================================================
 
+# Set Default Startup File (Passenger WSGI has priority)
+DirectoryIndex passenger_wsgi.py index.php index.html
+
 # 1. Security: Disable Directory Browsing and Server Signatures
 Options -Indexes
 ServerSignature Off
