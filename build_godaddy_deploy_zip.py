@@ -9,6 +9,10 @@ def build_godaddy_deploy_zip():
 
     # 1. Essential files to include at zip root
     essential_files = [
+        "package.json",
+        "server.js",
+        "app.js",
+        "index.html",
         "app.py",
         "database.py",
         "dependencies.py",
@@ -22,12 +26,12 @@ def build_godaddy_deploy_zip():
         "migrate_sqlite_to_mysql.py",
         ".env.example",
         "GODADDY_DEPLOYMENT_GUIDE.md",
-        "index.html",
         "recruitment_tracker.db",
     ]
 
     # Directories to include recursively
     essential_dirs = [
+        "public",
         "templates",
         "static",
         "uploads"
@@ -117,7 +121,7 @@ SECRET_KEY=key-dynamics-godaddy-secret-token-2026-production
     # Verification: Read back zip contents
     with zipfile.ZipFile(zip_path, "r") as check_zf:
         names = check_zf.namelist()
-        required = ["passenger_wsgi.py", "app.py", ".htaccess", "requirements.txt", "templates/index.html", "schema_mysql.sql"]
+        required = ["package.json", "server.js", "app.js", "passenger_wsgi.py", "app.py", ".htaccess", "requirements.txt", "templates/index.html", "schema_mysql.sql"]
         for r in required:
             assert r in names, f"CRITICAL: {r} is missing from zip!"
         assert not any("cloudflared" in n for n in names), "ERROR: cloudflared binary found in zip!"

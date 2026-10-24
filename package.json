@@ -1,0 +1,17 @@
+{
+  "name": "job-tracker",
+  "version": "1.0.0",
+  "description": "Key Dynamics Solutions - Job Requirement & Pipeline Management Portal",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "build": "echo build"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  },
+  "author": "Key Dynamics Solutions Private Limited",
+  "license": "ISC"
+}
